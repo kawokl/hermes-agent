@@ -41,6 +41,9 @@ from acp.schema import (
     PromptCapabilities,
     PromptResponse,
     ResumeSessionResponse,
+    SessionConfigOptionBoolean,
+    SessionConfigOptionSelect,
+    SessionConfigSelectOption,
     SetSessionConfigOptionResponse,
     SetSessionModelResponse,
     SetSessionModeResponse,
@@ -977,6 +980,32 @@ class HermesACPAgent(acp.Agent):
         )
 
     @staticmethod
+    def _session_config_options(
+        model_state: SessionModelState | None,
+    ) -> list[SessionConfigOptionSelect | SessionConfigOptionBoolean]:
+        """Expose ACP models through the stable config-options model category."""
+        if model_state is None or not model_state.available_models:
+            return []
+        return [
+            SessionConfigOptionSelect(
+                id="model",
+                name="Model",
+                description="Model used for this session.",
+                category="model",
+                type="select",
+                current_value=model_state.current_model_id,
+                options=[
+                    SessionConfigSelectOption(
+                        value=model.model_id,
+                        name=model.name,
+                        description=model.description,
+                    )
+                    for model in model_state.available_models
+                ],
+            )
+        ]
+
+    @staticmethod
     def _resolve_model_selection(raw_model: str, current_provider: str) -> tuple[str, str]:
         """Resolve ``provider:model`` input into the provider and normalized model id."""
         target_provider = current_provider
@@ -1600,9 +1629,11 @@ class HermesACPAgent(acp.Agent):
         logger.info("New session %s (cwd=%s)", state.session_id, cwd)
         self._schedule_available_commands_update(state.session_id)
         self._schedule_usage_update(state)
+        model_state = self._build_model_state(state)
         return NewSessionResponse(
             session_id=state.session_id,
-            models=self._build_model_state(state),
+            config_options=self._session_config_options(model_state),
+            models=model_state,
             modes=self._session_modes(state),
             field_meta=self._provenance_meta(
                 state.session_id, getattr(state.agent, "session_id", state.session_id)
@@ -1649,8 +1680,10 @@ class HermesACPAgent(acp.Agent):
             )
         self._schedule_available_commands_update(session_id)
         self._schedule_usage_update(state)
+        model_state = self._build_model_state(state)
         return LoadSessionResponse(
-            models=self._build_model_state(state),
+            config_options=self._session_config_options(model_state),
+            models=model_state,
             modes=self._session_modes(state),
             field_meta=self._provenance_meta(
                 session_id, getattr(state.agent, "session_id", session_id)
@@ -1685,8 +1718,10 @@ class HermesACPAgent(acp.Agent):
             )
         self._schedule_available_commands_update(state.session_id)
         self._schedule_usage_update(state)
+        model_state = self._build_model_state(state)
         return ResumeSessionResponse(
-            models=self._build_model_state(state),
+            config_options=self._session_config_options(model_state),
+            models=model_state,
             modes=self._session_modes(state),
             field_meta=self._provenance_meta(
                 state.session_id, getattr(state.agent, "session_id", state.session_id)
@@ -1728,9 +1763,11 @@ class HermesACPAgent(acp.Agent):
         logger.info("Forked session %s -> %s", session_id, new_id)
         if new_id:
             self._schedule_available_commands_update(new_id)
+        model_state = self._build_model_state(state) if state is not None else None
         return ForkSessionResponse(
             session_id=new_id,
-            models=self._build_model_state(state) if state is not None else None,
+            config_options=self._session_config_options(model_state),
+            models=model_state,
             modes=self._session_modes(state) if state is not None else None,
         )
 
@@ -2618,13 +2655,22 @@ class HermesACPAgent(acp.Agent):
         return SetSessionModeResponse()
 
     async def set_config_option(
-        self, config_id: str, session_id: str, value: str, **kwargs: Any
+        self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
     ) -> SetSessionConfigOptionResponse | None:
-        """Accept ACP config option updates even when Hermes has no typed ACP config surface yet."""
+        """Apply ACP session configuration updates."""
         state = self.session_manager.get_session(session_id)
         if state is None:
             logger.warning("Session %s: config update requested for missing session", session_id)
             return None
+
+        if str(config_id) == "model":
+            await self.set_session_model(str(value), session_id)
+            state = self.session_manager.get_session(session_id) or state
+            return SetSessionConfigOptionResponse(
+                config_options=self._session_config_options(
+                    self._build_model_state(state)
+                )
+            )
 
         if str(config_id) == self._EDIT_APPROVAL_POLICY_CONFIG_ID:
             mode = self._EDIT_APPROVAL_POLICY_TO_MODE.get(str(value), self._MODE_DEFAULT)
@@ -2637,4 +2683,8 @@ class HermesACPAgent(acp.Agent):
             setattr(state, "config_options", options)
         self.session_manager.save_session(session_id)
         logger.info("Session %s: config option %s updated", session_id, config_id)
-        return SetSessionConfigOptionResponse(config_options=[])
+        return SetSessionConfigOptionResponse(
+            config_options=self._session_config_options(
+                self._build_model_state(state)
+            )
+        )

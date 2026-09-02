@@ -19,9 +19,11 @@ from acp.schema import (
     Implementation,
     InitializeResponse,
     LoadSessionResponse,
+    ModelInfo,
     NewSessionResponse,
     PromptResponse,
     ResumeSessionResponse,
+    SessionConfigOptionSelect,
     SessionModelState,
     SessionModeState,
     SetSessionConfigOptionResponse,
@@ -58,10 +60,45 @@ def agent(mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_new_session_exposes_edit_approvals_as_modes_not_config_options(agent):
-    resp = await agent.new_session(cwd="/tmp")
+async def test_empty_model_inventory_does_not_advertise_empty_selector(agent):
+    model_state = SessionModelState(current_model_id="", available_models=[])
 
-    assert resp.config_options is None
+    assert agent._session_config_options(model_state) == []
+
+
+@pytest.mark.asyncio
+async def test_new_session_exposes_models_as_config_option_and_edit_approvals_as_modes(agent):
+    model_state = SessionModelState(
+        current_model_id="openai-codex:gpt-5.6-sol",
+        available_models=[
+            ModelInfo(
+                model_id="openai-codex:gpt-5.6-sol",
+                name="OpenAI Codex · gpt-5.6-sol",
+                description="Provider: OpenAI Codex • current",
+            ),
+            ModelInfo(
+                model_id="anthropic:claude-opus-5",
+                name="Anthropic · claude-opus-5",
+                description="Provider: Anthropic",
+            ),
+        ],
+    )
+
+    with patch.object(agent, "_build_model_state", return_value=model_state):
+        resp = await agent.new_session(cwd="/tmp")
+
+    assert resp.config_options is not None
+    assert len(resp.config_options) == 1
+    model_option = resp.config_options[0]
+    assert isinstance(model_option, SessionConfigOptionSelect)
+    assert model_option.id == "model"
+    assert model_option.name == "Model"
+    assert model_option.category == "model"
+    assert model_option.current_value == "openai-codex:gpt-5.6-sol"
+    assert [(option.value, option.name) for option in model_option.options] == [
+        ("openai-codex:gpt-5.6-sol", "OpenAI Codex · gpt-5.6-sol"),
+        ("anthropic:claude-opus-5", "Anthropic · claude-opus-5"),
+    ]
     assert isinstance(resp.modes, SessionModeState)
     assert resp.modes.current_mode_id == "default"
     assert [(mode.id, mode.name) for mode in resp.modes.available_modes] == [
@@ -72,17 +109,28 @@ async def test_new_session_exposes_edit_approvals_as_modes_not_config_options(ag
 
 
 @pytest.mark.asyncio
-async def test_set_config_option_persists_edit_approval_policy_without_advertising_config(agent):
-    resp = await agent.new_session(cwd="/tmp")
-    update = await agent.set_config_option(
-        "edit_approval_policy",
-        resp.session_id,
-        "workspace_session",
+async def test_edit_approval_config_returns_model_option_without_advertising_policy(agent):
+    model_state = SessionModelState(
+        current_model_id="openai-codex:gpt-5.6-sol",
+        available_models=[
+            ModelInfo(
+                model_id="openai-codex:gpt-5.6-sol",
+                name="OpenAI Codex · gpt-5.6-sol",
+            )
+        ],
     )
+
+    with patch.object(agent, "_build_model_state", return_value=model_state):
+        resp = await agent.new_session(cwd="/tmp")
+        update = await agent.set_config_option(
+            "edit_approval_policy",
+            resp.session_id,
+            "workspace_session",
+        )
     state = agent.session_manager.get_session(resp.session_id)
 
     assert isinstance(update, SetSessionConfigOptionResponse)
-    assert update.config_options == []
+    assert [option.id for option in update.config_options] == ["model"]
     assert getattr(state, "mode", None) == "accept_edits"
 
 
@@ -286,6 +334,30 @@ class TestSessionOps:
         resp = await agent.load_session(cwd="/tmp", session_id="bogus")
         assert resp is None
 
+    @pytest.mark.asyncio
+    async def test_load_session_exposes_model_config_option(self, agent):
+        model_state = SessionModelState(
+            current_model_id="openai-codex:gpt-5.6-sol",
+            available_models=[
+                ModelInfo(
+                    model_id="openai-codex:gpt-5.6-sol",
+                    name="OpenAI Codex · gpt-5.6-sol",
+                )
+            ],
+        )
+
+        with patch.object(agent, "_build_model_state", return_value=model_state):
+            new_resp = await agent.new_session(cwd="/tmp")
+            loaded = await agent.load_session(
+                cwd="/tmp", session_id=new_resp.session_id
+            )
+
+        assert loaded.config_options is not None
+        assert [option.id for option in loaded.config_options] == ["model"]
+        assert loaded.config_options[0].current_value == (
+            "openai-codex:gpt-5.6-sol"
+        )
+
 
 
 
@@ -314,6 +386,30 @@ class TestSessionOps:
             for update in updates
         )
 
+    @pytest.mark.asyncio
+    async def test_resume_session_exposes_model_config_option(self, agent):
+        model_state = SessionModelState(
+            current_model_id="openai-codex:gpt-5.6-sol",
+            available_models=[
+                ModelInfo(
+                    model_id="openai-codex:gpt-5.6-sol",
+                    name="OpenAI Codex · gpt-5.6-sol",
+                )
+            ],
+        )
+
+        with patch.object(agent, "_build_model_state", return_value=model_state):
+            new_resp = await agent.new_session(cwd="/tmp")
+            resumed = await agent.resume_session(
+                cwd="/tmp", session_id=new_resp.session_id
+            )
+
+        assert resumed.config_options is not None
+        assert [option.id for option in resumed.config_options] == ["model"]
+        assert resumed.config_options[0].current_value == (
+            "openai-codex:gpt-5.6-sol"
+        )
+
 
 
 
@@ -336,6 +432,31 @@ class TestListAndFork:
         fork_resp = await agent.fork_session(cwd="/forked", session_id=new_resp.session_id)
         assert fork_resp.session_id
         assert fork_resp.session_id != new_resp.session_id
+
+    @pytest.mark.asyncio
+    async def test_fork_session_exposes_model_config_option(self, agent):
+        model_state = SessionModelState(
+            current_model_id="openai-codex:gpt-5.6-sol",
+            available_models=[
+                ModelInfo(
+                    model_id="openai-codex:gpt-5.6-sol",
+                    name="OpenAI Codex · gpt-5.6-sol",
+                )
+            ],
+        )
+
+        with patch.object(agent, "_build_model_state", return_value=model_state):
+            new_resp = await agent.new_session(cwd="/original")
+            fork_resp = await agent.fork_session(
+                cwd="/forked", session_id=new_resp.session_id
+            )
+
+        assert fork_resp.config_options is not None
+        assert len(fork_resp.config_options) == 1
+        assert fork_resp.config_options[0].id == "model"
+        assert fork_resp.config_options[0].current_value == (
+            "openai-codex:gpt-5.6-sol"
+        )
 
     @pytest.mark.asyncio
     async def test_list_sessions_includes_title_and_updated_at(self, agent):
@@ -370,6 +491,58 @@ class TestListAndFork:
 class TestSessionConfiguration:
 
     @pytest.mark.asyncio
+    async def test_model_config_option_switches_session_provider_and_model(self, agent, mock_manager):
+        state = mock_manager.create_session(cwd="/tmp")
+        state.model = "gpt-5.6-sol"
+        state.agent.provider = "openai-codex"
+        state.agent.model = "gpt-5.6-sol"
+        state.agent.base_url = "https://chatgpt.com/backend-api/codex"
+        state.agent.api_mode = "responses"
+        replacement_agent = SimpleNamespace(
+            provider="anthropic",
+            model="claude-opus-5",
+            base_url=None,
+            api_mode=None,
+        )
+        switched_model_state = SessionModelState(
+            current_model_id="anthropic:claude-opus-5",
+            available_models=[
+                ModelInfo(
+                    model_id="anthropic:claude-opus-5",
+                    name="Anthropic · claude-opus-5",
+                )
+            ],
+        )
+
+        with (
+            patch.object(
+                mock_manager, "_make_agent", return_value=replacement_agent
+            ) as make_agent,
+            patch.object(
+                agent, "_build_model_state", return_value=switched_model_state
+            ),
+        ):
+            update = await agent.set_config_option(
+                "model",
+                state.session_id,
+                "anthropic:claude-opus-5",
+            )
+
+        assert state.model == "claude-opus-5"
+        assert state.agent is replacement_agent
+        make_agent.assert_called_once_with(
+            session_id=state.session_id,
+            cwd="/tmp",
+            model="claude-opus-5",
+            requested_provider="anthropic",
+            base_url=None,
+            api_mode=None,
+        )
+        assert isinstance(update, SetSessionConfigOptionResponse)
+        assert len(update.config_options) == 1
+        assert update.config_options[0].current_value == "anthropic:claude-opus-5"
+
+    @pytest.mark.asyncio
     async def test_router_accepts_stable_session_config_methods(self, agent):
         new_resp = await agent.new_session(cwd="/tmp")
         router = build_agent_router(agent)
@@ -390,7 +563,9 @@ class TestSessionConfiguration:
         )
 
         assert mode_result == {}
-        assert config_result["configOptions"] == []
+        assert [option["id"] for option in config_result["configOptions"]] == [
+            "model"
+        ]
 
 
 

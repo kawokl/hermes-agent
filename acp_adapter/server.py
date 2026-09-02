@@ -683,10 +683,13 @@ class HermesACPAgent(acp.Agent):
     _PLAN_MODE_INSTRUCTION = (
         "[Plan mode is active] Do not change anything. Editing, terminal, and "
         "other system-changing tools are disabled and will return an error. "
-        "Use read-only tools (reading, searching, web) to investigate, then "
-        "reply with a concrete step-by-step plan: what you would change, in "
-        "which files, and how it would be verified. Wait for the user to leave "
-        "plan mode before executing anything."
+        "Use read-only tools (reading, searching, web) to investigate. Before "
+        "your final response, you MUST call todo_list with the complete "
+        "structured plan: one concise item per executable step, each with a "
+        "stable id and status 'pending' (use merge=false). This publishes the "
+        "plan in the editor's native plan UI. Then reply with a concise summary "
+        "covering which files would change and how the work would be verified. "
+        "Wait for the user to leave plan mode before executing anything."
     )
     #: Single source of truth for the edit-approval selector. ACP requires the
     #: legacy ``modes`` field and the ``category="mode"`` config option to stay

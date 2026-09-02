@@ -716,6 +716,34 @@ class TestPrompt:
 
         assert captured.get("child") == resp.session_id
 
+    @pytest.mark.asyncio
+    async def test_plan_mode_instructs_agent_to_publish_todos_for_native_plan_ui(
+        self, agent, mock_manager
+    ):
+        """Plan mode must drive the real todo_list -> ACP plan-event bridge."""
+        resp = await agent.new_session(cwd=".")
+        state = mock_manager.get_session(resp.session_id)
+        captured: dict[str, object] = {}
+
+        def _run(*args, **kwargs):
+            captured["user_message"] = kwargs.get("user_message")
+            return {"final_response": "plan ready", "messages": []}
+
+        state.agent.run_conversation = _run
+        state.agent.model = "test-model"
+        state.agent.provider = "openrouter"
+        await agent.set_config_option("mode", resp.session_id, "plan")
+
+        await agent.prompt(
+            prompt=[TextContentBlock(type="text", text="Plan this feature")],
+            session_id=resp.session_id,
+        )
+
+        rendered = str(captured.get("user_message") or "")
+        assert "todo_list" in rendered
+        assert "pending" in rendered
+        assert "structured plan" in rendered.lower()
+
 
 
 

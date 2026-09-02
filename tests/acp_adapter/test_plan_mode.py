@@ -46,9 +46,31 @@ def test_plan_mode_blocks_every_mutating_tool(plan_mode, tool_name):
     assert "Plan mode" in payload["error"]
 
 
+def test_plan_mode_blocks_unknown_tools_fail_closed(plan_mode):
+    """A future side-effecting tool must not bypass plan mode by default."""
+    blocked = maybe_block_for_plan_mode("future_system_mutator")
+
+    assert blocked is not None
+    assert "future_system_mutator" in json.loads(blocked)["error"]
+
+
 @pytest.mark.parametrize(
     "tool_name",
-    ["read_file", "search_files", "web_search", "web_extract", "skill_view"],
+    [
+        "read_file",
+        "search_files",
+        "web_search",
+        "web_extract",
+        "skill_view",
+        "skills_list",
+        "vision_analyze",
+        "session_search",
+        "tool_search",
+        "tool_describe",
+        "clarify",
+        # Deliberate state change: this is the source for ACP's native plan UI.
+        "todo_list",
+    ],
 )
 def test_plan_mode_allows_read_only_tools(plan_mode, tool_name):
     assert maybe_block_for_plan_mode(tool_name) is None

@@ -170,7 +170,37 @@ class TestStepCallback:
         }
         mock_send.assert_called_once()
 
-    def test_todo_completion_emits_native_plan_update_after_tool_completion(self, mock_conn, event_loop_fixture):
+    def test_todo_list_completion_event_immediately_emits_native_plan_update(
+        self, mock_conn, event_loop_fixture
+    ):
+        """A final todo_list call must publish its plan without a later agent step."""
+        tool_call_ids = {}
+        cb = make_tool_progress_cb(
+            mock_conn, "session-1", event_loop_fixture, tool_call_ids, {}
+        )
+        todo_result = (
+            '{"todos":['
+            '{"id":"inspect","content":"Inspect ACP","status":"completed"},'
+            '{"id":"patch","content":"Patch renderer","status":"pending"}'
+            '],"summary":{"total":2}}'
+        )
+
+        with patch("acp_adapter.events._send_update") as mock_send:
+            cb("tool.started", "todo_list", None, {"todos": []})
+            cb("tool.completed", "todo_list", None, None, result=todo_result)
+
+        updates = [call.args[3] for call in mock_send.call_args_list]
+        assert [getattr(update, "session_update", None) for update in updates] == [
+            "tool_call",
+            "plan",
+        ]
+        assert [entry.content for entry in updates[1].entries] == [
+            "Inspect ACP",
+            "Patch renderer",
+        ]
+
+    def test_legacy_todo_completion_emits_native_plan_update_after_tool_completion(self, mock_conn, event_loop_fixture):
+        """Keep supporting the historical `todo` tool name in step callbacks."""
         from collections import deque
 
         tool_call_ids = {"todo": deque(["tc-todo"])}

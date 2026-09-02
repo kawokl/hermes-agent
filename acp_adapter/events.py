@@ -132,6 +132,16 @@ def make_tool_progress_cb(
     """
 
     def _tool_progress(event_type: str, name: str = None, preview: str = None, args: Any = None, **kwargs) -> None:
+        # todo_list is commonly the final tool call before the model's answer.
+        # Publish its native ACP plan immediately on completion: waiting for
+        # step_callback would lose the event when there is no subsequent agent
+        # step. Generic tool completion remains projected by step_callback.
+        if event_type == "tool.completed" and name == "todo_list":
+            plan_update = _build_plan_update_from_todo_result(kwargs.get("result"))
+            if plan_update is not None:
+                _send_update(conn, session_id, loop, plan_update)
+            return
+
         # Only emit ACP ToolCallStart for tool.started; ignore other event types
         if event_type != "tool.started":
             return

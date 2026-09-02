@@ -47,19 +47,43 @@ AUTO_APPROVE_ASK = "ask"
 AUTO_APPROVE_WORKSPACE = "workspace_session"
 AUTO_APPROVE_SESSION = "session"
 
-#: Tools blocked while the session is in plan mode. Plan mode promises "no side
-#: effects", so every tool that can mutate the machine is refused — including
-#: ``terminal``, since shell commands cannot be reliably classified as
-#: read-only. Read/search/web tools stay available so the agent can research
-#: and produce a plan.
+#: Plan mode is fail-closed. Only tools that are intrinsically read-only are
+#: allowed, plus ``todo_list`` (the deliberate in-memory state change that
+#: feeds ACP's native structured plan UI) and ``clarify`` (user interaction,
+#: not an external side effect). Every other current or future tool is blocked.
+PLAN_MODE_ALLOWED_TOOLS = frozenset(
+    {
+        "read_file",
+        "search_files",
+        "web_search",
+        "web_extract",
+        "skill_view",
+        "skills_list",
+        "vision_analyze",
+        "session_search",
+        "tool_search",
+        "tool_describe",
+        "clarify",
+        "todo_list",
+    }
+)
+
+#: Named mutating tools kept as an auditable regression-test set. This is not
+#: the enforcement list — the allowlist above is, so unknown tools fail closed.
 PLAN_MODE_BLOCKED_TOOLS = frozenset(
     {
         "write_file",
         "patch",
         "skill_manage",
         "terminal",
+        "execute_code",
         "process_manage",
         "cronjob_manage",
+        "browser_exec",
+        "tool_call",
+        "delegate_task",
+        "message_agent",
+        "memory",
     }
 )
 
@@ -91,7 +115,7 @@ def maybe_block_for_plan_mode(tool_name: str) -> str | None:
 
     if not _PLAN_MODE.get():
         return None
-    if str(tool_name) not in PLAN_MODE_BLOCKED_TOOLS:
+    if str(tool_name) in PLAN_MODE_ALLOWED_TOOLS:
         return None
     logger.info("Plan mode blocked tool %s", tool_name)
     return json.dumps(

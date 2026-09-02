@@ -1484,6 +1484,32 @@ def handle_function_call(
                 )
                 return result
 
+        # ACP/Zed plan mode runs before any tool that can change the system.
+        # The ContextVar is bound only for ACP sessions in plan mode, so CLI and
+        # gateway paths are unaffected when it is unset.
+        try:
+            from acp_adapter.edit_approval import maybe_block_for_plan_mode
+
+            plan_block_message = maybe_block_for_plan_mode(function_name)
+        except Exception as _plan_mode_err:
+            logger.debug("ACP plan mode guard error: %s", _plan_mode_err)
+            plan_block_message = None
+        if plan_block_message is not None:
+            _emit_post_tool_call_hook(
+                function_name=function_name,
+                function_args=function_args,
+                result=plan_block_message,
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                status="blocked",
+                error_type="plan_mode_blocked",
+                middleware_trace=list(_tool_middleware_trace),
+            )
+            return plan_block_message
+
         # ACP/Zed edit approval runs before any file mutation.  The requester
         # is bound via ContextVar only for ACP sessions, so CLI/gateway paths
         # are unaffected when it is unset.

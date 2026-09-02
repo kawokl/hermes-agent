@@ -43,6 +43,7 @@ from acp.schema import (
     ResumeSessionResponse,
     SessionConfigOptionBoolean,
     SessionConfigOptionSelect,
+    SessionConfigSelectGroup,
     SessionConfigSelectOption,
     SetSessionConfigOptionResponse,
     SetSessionModelResponse,
@@ -657,22 +658,46 @@ class HermesACPAgent(acp.Agent):
 
     _EDIT_APPROVAL_POLICY_CONFIG_ID = "edit_approval_policy"
     _EDIT_APPROVAL_POLICY_DEFAULT = "ask"
+    _MODE_PLAN = "plan"
     _MODE_DEFAULT = "default"
     _MODE_ACCEPT_EDITS = "accept_edits"
     _MODE_DONT_ASK = "dont_ask"
     _MODE_TO_EDIT_APPROVAL_POLICY = {
+        # Plan mode never reaches the edit-approval gate (mutating tools are
+        # refused outright), but it maps to "ask" so any path that consults the
+        # policy fails closed rather than auto-approving.
+        _MODE_PLAN: "ask",
         _MODE_DEFAULT: "ask",
         _MODE_ACCEPT_EDITS: "workspace_session",
         _MODE_DONT_ASK: "session",
     }
     _EDIT_APPROVAL_POLICY_TO_MODE = {
-        value: key for key, value in _MODE_TO_EDIT_APPROVAL_POLICY.items()
+        "ask": _MODE_DEFAULT,
+        "workspace_session": _MODE_ACCEPT_EDITS,
+        "session": _MODE_DONT_ASK,
     }
     _MODE_CONFIG_ID = "mode"
+    #: Appended to the user prompt while plan mode is active. The tool guard is
+    #: the enforcement; this tells the model why the tools are gone so it
+    #: researches and proposes instead of retrying blocked calls.
+    _PLAN_MODE_INSTRUCTION = (
+        "[Plan mode is active] Do not change anything. Editing, terminal, and "
+        "other system-changing tools are disabled and will return an error. "
+        "Use read-only tools (reading, searching, web) to investigate, then "
+        "reply with a concrete step-by-step plan: what you would change, in "
+        "which files, and how it would be verified. Wait for the user to leave "
+        "plan mode before executing anything."
+    )
     #: Single source of truth for the edit-approval selector. ACP requires the
     #: legacy ``modes`` field and the ``category="mode"`` config option to stay
     #: in sync, so both renderings are built from this one definition.
     _MODE_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
+        (
+            _MODE_PLAN,
+            "Plan",
+            "Research and propose a plan; editing, terminal, and other "
+            "system-changing tools are disabled.",
+        ),
         (_MODE_DEFAULT, "Default", "Ask before edits."),
         (
             _MODE_ACCEPT_EDITS,
@@ -850,15 +875,10 @@ class HermesACPAgent(acp.Agent):
                     description = f"Provider: {provider_name}"
                     if is_current:
                         description += " • current"
-                    display_name = (
-                        rendered_model
-                        if normalize_provider(encoded_provider) == "openai-codex"
-                        else f"{provider_name} · {rendered_model}"
-                    )
                     available_models.append(
                         ModelInfo(
                             model_id=choice_id,
-                            name=display_name,
+                            name=rendered_model,
                             description=description,
                         )
                     )
@@ -966,9 +986,7 @@ class HermesACPAgent(acp.Agent):
                     0,
                     ModelInfo(
                         model_id=current_model_id,
-                        name=model
-                        if normalize_provider(normalized_provider) == "openai-codex"
-                        else f"{provider_name} · {model}",
+                        name=model,
                         description=f"Provider: {provider_name} • current",
                     ),
                 )
@@ -1037,17 +1055,59 @@ class HermesACPAgent(acp.Agent):
                 category="model",
                 type="select",
                 current_value=model_state.current_model_id,
-                options=[
-                    SessionConfigSelectOption(
-                        value=model.model_id,
-                        name=model.name,
-                        description=model.description,
-                    )
-                    for model in model_state.available_models
-                ],
+                options=self._grouped_model_options(model_state),
             )
         )
         return options
+
+    @staticmethod
+    def _grouped_model_options(
+        model_state: SessionModelState,
+    ) -> list[SessionConfigSelectGroup] | list[SessionConfigSelectOption]:
+        """Group model options by provider so entries show only the model name.
+
+        Repeating "ChatGPT or Codex Subscription · " on every row pushed the
+        actual model name out of the picker's width. ACP select options may be
+        grouped, so the provider becomes the group heading and each row is just
+        the model id. Falls back to a flat list when the provider cannot be
+        derived, since a wrong grouping is worse than none.
+        """
+        groups: dict[str, list[SessionConfigSelectOption]] = {}
+        order: list[str] = []
+        for model in model_state.available_models:
+            # ``description`` is authored as "Provider: <name>[ • current]".
+            raw = str(model.description or "")
+            if not raw.startswith("Provider: "):
+                return [
+                    SessionConfigSelectOption(
+                        value=m.model_id, name=m.name, description=m.description
+                    )
+                    for m in model_state.available_models
+                ]
+            provider_name = raw[len("Provider: ") :].split(" • ", 1)[0].strip()
+            if not provider_name:
+                return [
+                    SessionConfigSelectOption(
+                        value=m.model_id, name=m.name, description=m.description
+                    )
+                    for m in model_state.available_models
+                ]
+            if provider_name not in groups:
+                groups[provider_name] = []
+                order.append(provider_name)
+            groups[provider_name].append(
+                SessionConfigSelectOption(
+                    value=model.model_id,
+                    name=model.name,
+                    description=model.description,
+                )
+            )
+        return [
+            SessionConfigSelectGroup(
+                group=provider_name, name=provider_name, options=groups[provider_name]
+            )
+            for provider_name in order
+        ]
 
     @staticmethod
     def _resolve_model_selection(raw_model: str, current_provider: str) -> tuple[str, str]:
@@ -2006,6 +2066,20 @@ class HermesACPAgent(acp.Agent):
 
         logger.info("Prompt on session %s: %s", session_id, user_text[:100])
 
+        # Plan mode: tell the model what it may do. The guard in model_tools
+        # enforces this regardless, but without the instruction the model would
+        # keep reaching for blocked tools and burn the turn on refusals. This is
+        # appended to the *user* content, never the system prompt, so
+        # per-conversation prompt caching is preserved.
+        if self._current_mode_id(state) == self._MODE_PLAN:
+            if isinstance(user_content, str):
+                user_content = f"{user_content}\n\n{self._PLAN_MODE_INSTRUCTION}"
+            elif isinstance(user_content, list):
+                user_content = [
+                    *user_content,
+                    {"type": "text", "text": self._PLAN_MODE_INSTRUCTION},
+                ]
+
         conn = self._conn
         loop = asyncio.get_running_loop()
 
@@ -2083,10 +2157,12 @@ class HermesACPAgent(acp.Agent):
         previous_approval_cb = None
         interactive_token = None
         edit_approval_token = None
+        plan_mode_token = None
         previous_session_id = None
 
         def _run_agent() -> dict:
-            nonlocal previous_approval_cb, interactive_token, edit_approval_token, previous_session_id
+            nonlocal previous_approval_cb, interactive_token, edit_approval_token
+            nonlocal plan_mode_token, previous_session_id
             # Bind HERMES_SESSION_KEY for this session so per-session caches
             # (e.g. the interactive sudo password cache in tools.terminal_tool)
             # scope to the ACP session rather than leaking across sessions
@@ -2129,6 +2205,16 @@ class HermesACPAgent(acp.Agent):
                     edit_approval_token = set_edit_approval_requester(edit_approval_requester)
                 except Exception:
                     logger.debug("Could not set ACP edit approval requester", exc_info=True)
+            # Plan mode is bound per turn (not per session) so switching the
+            # selector mid-conversation takes effect on the very next prompt.
+            try:
+                from acp_adapter.edit_approval import set_plan_mode
+
+                plan_mode_token = set_plan_mode(
+                    self._current_mode_id(state) == self._MODE_PLAN
+                )
+            except Exception:
+                logger.debug("Could not set ACP plan mode", exc_info=True)
             # Signal to tools.approval that we have an interactive callback
             # and the non-interactive auto-approve path must not fire. Uses a
             # contextvar (not os.environ) so concurrent executor workers don't
@@ -2185,6 +2271,13 @@ class HermesACPAgent(acp.Agent):
                         reset_edit_approval_requester(edit_approval_token)
                     except Exception:
                         logger.debug("Could not restore ACP edit approval requester", exc_info=True)
+                if plan_mode_token is not None:
+                    try:
+                        from acp_adapter.edit_approval import reset_plan_mode
+
+                        reset_plan_mode(plan_mode_token)
+                    except Exception:
+                        logger.debug("Could not restore ACP plan mode", exc_info=True)
                 if session_tokens is not None and clear_session_vars is not None:
                     try:
                         clear_session_vars(session_tokens)

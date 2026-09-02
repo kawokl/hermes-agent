@@ -47,6 +47,64 @@ AUTO_APPROVE_ASK = "ask"
 AUTO_APPROVE_WORKSPACE = "workspace_session"
 AUTO_APPROVE_SESSION = "session"
 
+#: Tools blocked while the session is in plan mode. Plan mode promises "no side
+#: effects", so every tool that can mutate the machine is refused — including
+#: ``terminal``, since shell commands cannot be reliably classified as
+#: read-only. Read/search/web tools stay available so the agent can research
+#: and produce a plan.
+PLAN_MODE_BLOCKED_TOOLS = frozenset(
+    {
+        "write_file",
+        "patch",
+        "skill_manage",
+        "terminal",
+        "process_manage",
+        "cronjob_manage",
+    }
+)
+
+_PLAN_MODE: ContextVar[bool] = ContextVar("ACP_PLAN_MODE", default=False)
+
+
+def set_plan_mode(enabled: bool) -> Token:
+    """Bind plan mode for the current context; returns a reset token."""
+
+    return _PLAN_MODE.set(bool(enabled))
+
+
+def reset_plan_mode(token: Token) -> None:
+    """Restore a previous plan-mode binding."""
+
+    _PLAN_MODE.reset(token)
+
+
+def is_plan_mode() -> bool:
+    return _PLAN_MODE.get()
+
+
+def maybe_block_for_plan_mode(tool_name: str) -> str | None:
+    """Return a tool-error string when plan mode forbids ``tool_name``.
+
+    Returns ``None`` when the call may proceed, so non-ACP sessions (where the
+    ContextVar is never set) are unaffected.
+    """
+
+    if not _PLAN_MODE.get():
+        return None
+    if str(tool_name) not in PLAN_MODE_BLOCKED_TOOLS:
+        return None
+    logger.info("Plan mode blocked tool %s", tool_name)
+    return json.dumps(
+        {
+            "error": (
+                f"Plan mode is active: '{tool_name}' is disabled because it can "
+                "change the system. Research with read-only tools and present a "
+                "plan; the user can switch the session mode to apply it."
+            )
+        },
+        ensure_ascii=False,
+    )
+
 
 def set_edit_approval_requester(requester: EditApprovalRequester | None) -> Token:
     """Bind an ACP edit approval requester for the current context."""

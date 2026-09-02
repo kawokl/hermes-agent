@@ -81,6 +81,23 @@ def test_model_selector_requires_current_value_in_options(agent, current_model_i
     assert [option.id for option in agent._session_config_options(model_state)] == ["mode"]
 
 
+def test_model_options_fall_back_to_flat_list_without_provider_descriptions(agent):
+    """A wrong grouping is worse than none: unparseable descriptions stay flat."""
+    model_state = SessionModelState(
+        current_model_id="custom:local-model",
+        available_models=[
+            ModelInfo(model_id="custom:local-model", name="local-model"),
+        ],
+    )
+
+    options = agent._session_config_options(model_state)
+    model_option = next(option for option in options if option.id == "model")
+
+    assert [(o.value, o.name) for o in model_option.options] == [
+        ("custom:local-model", "local-model")
+    ]
+
+
 def test_mode_config_option_matches_legacy_modes_field(agent):
     """ACP requires `modes` and the `category="mode"` option to stay in sync."""
     state = SimpleNamespace(mode="accept_edits", cwd="/tmp")
@@ -103,12 +120,12 @@ async def test_new_session_exposes_models_as_config_option_and_edit_approvals_as
         available_models=[
             ModelInfo(
                 model_id="openai-codex:gpt-5.6-sol",
-                name="OpenAI Codex · gpt-5.6-sol",
+                name="gpt-5.6-sol",
                 description="Provider: OpenAI Codex • current",
             ),
             ModelInfo(
                 model_id="anthropic:claude-opus-5",
-                name="Anthropic · claude-opus-5",
+                name="claude-opus-5",
                 description="Provider: Anthropic",
             ),
         ],
@@ -126,13 +143,23 @@ async def test_new_session_exposes_models_as_config_option_and_edit_approvals_as
     assert model_option.name == "Model"
     assert model_option.category == "model"
     assert model_option.current_value == "openai-codex:gpt-5.6-sol"
-    assert [(option.value, option.name) for option in model_option.options] == [
-        ("openai-codex:gpt-5.6-sol", "OpenAI Codex · gpt-5.6-sol"),
-        ("anthropic:claude-opus-5", "Anthropic · claude-opus-5"),
+    # Options are grouped by provider so each row is just the model name.
+    assert [(group.group, group.name) for group in model_option.options] == [
+        ("OpenAI Codex", "OpenAI Codex"),
+        ("Anthropic", "Anthropic"),
+    ]
+    assert [
+        (option.value, option.name)
+        for group in model_option.options
+        for option in group.options
+    ] == [
+        ("openai-codex:gpt-5.6-sol", "gpt-5.6-sol"),
+        ("anthropic:claude-opus-5", "claude-opus-5"),
     ]
     assert isinstance(resp.modes, SessionModeState)
     assert resp.modes.current_mode_id == "default"
     assert [(mode.id, mode.name) for mode in resp.modes.available_modes] == [
+        ("plan", "Plan"),
         ("default", "Default"),
         ("accept_edits", "Accept Edits"),
         ("dont_ask", "Don't Ask"),
@@ -299,10 +326,17 @@ class TestSessionOps:
             "openai-codex:gpt-5.4",
             "openai-codex:gpt-5.4-mini",
         ]
+        # The provider is carried by the option group, not repeated in every
+        # row, so a narrow picker still shows the whole model name.
         assert [model.name for model in resp.models.available_models] == [
-            "Anthropic · claude-sonnet-4-6",
+            "claude-sonnet-4-6",
             "gpt-5.4",
             "gpt-5.4-mini",
+        ]
+        assert [model.description for model in resp.models.available_models] == [
+            "Provider: Anthropic",
+            "Provider: OpenAI Codex • current",
+            "Provider: OpenAI Codex",
         ]
         assert resp.models.available_models[1].description is not None
         assert "current" in resp.models.available_models[1].description

@@ -668,6 +668,23 @@ class HermesACPAgent(acp.Agent):
     _EDIT_APPROVAL_POLICY_TO_MODE = {
         value: key for key, value in _MODE_TO_EDIT_APPROVAL_POLICY.items()
     }
+    _MODE_CONFIG_ID = "mode"
+    #: Single source of truth for the edit-approval selector. ACP requires the
+    #: legacy ``modes`` field and the ``category="mode"`` config option to stay
+    #: in sync, so both renderings are built from this one definition.
+    _MODE_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
+        (_MODE_DEFAULT, "Default", "Ask before edits."),
+        (
+            _MODE_ACCEPT_EDITS,
+            "Accept Edits",
+            "Auto-allow workspace and /tmp edits; still asks for sensitive paths.",
+        ),
+        (
+            _MODE_DONT_ASK,
+            "Don't Ask",
+            "Auto-allow file edits for this session except sensitive paths.",
+        ),
+    )
 
     def __init__(self, session_manager: SessionManager | None = None):
         super().__init__()
@@ -682,36 +699,27 @@ class HermesACPAgent(acp.Agent):
         logger.info("ACP client connected")
 
 
-    def _session_modes(self, state: SessionState) -> SessionModeState:
-        """Return ACP session modes while preserving Zed's separate model picker.
-
-        Zed renders ``config_options`` in the prominent selector slot where the
-        model picker was visible. Claude/Codex expose policy-like controls as ACP
-        modes, which coexist with the model picker, so Hermes maps edit approval
-        policy onto modes instead of advertising config options.
-        """
-
+    def _current_mode_id(self, state: SessionState | None) -> str:
+        """Return the session's edit-approval mode, falling back to the default."""
         current = str(getattr(state, "mode", "") or self._MODE_DEFAULT)
         if current not in self._MODE_TO_EDIT_APPROVAL_POLICY:
             current = self._MODE_DEFAULT
+        return current
+
+    def _session_modes(self, state: SessionState) -> SessionModeState:
+        """Return the legacy ACP ``modes`` view of the edit-approval selector.
+
+        ACP supersedes ``modes`` with ``config_options``, but clients that only
+        speak the older API still read this field, so it is advertised alongside
+        the ``category="mode"`` config option and built from the same
+        ``_MODE_DEFINITIONS`` to keep both in sync.
+        """
+
         return SessionModeState(
-            current_mode_id=current,
+            current_mode_id=self._current_mode_id(state),
             available_modes=[
-                SessionMode(
-                    id=self._MODE_DEFAULT,
-                    name="Default",
-                    description="Ask before edits.",
-                ),
-                SessionMode(
-                    id=self._MODE_ACCEPT_EDITS,
-                    name="Accept Edits",
-                    description="Auto-allow workspace and /tmp edits; still asks for sensitive paths.",
-                ),
-                SessionMode(
-                    id=self._MODE_DONT_ASK,
-                    name="Don't Ask",
-                    description="Auto-allow file edits for this session except sensitive paths.",
-                ),
+                SessionMode(id=mode_id, name=name, description=description)
+                for mode_id, name, description in self._MODE_DEFINITIONS
             ],
         )
 
@@ -986,19 +994,42 @@ class HermesACPAgent(acp.Agent):
             current_model_id=fallback_choice,
         )
 
-    @staticmethod
     def _session_config_options(
+        self,
         model_state: SessionModelState | None,
+        state: SessionState | None = None,
     ) -> list[SessionConfigOptionSelect | SessionConfigOptionBoolean]:
-        """Expose ACP models through the stable config-options model category."""
+        """Expose the session's mode and model selectors as ACP config options.
+
+        ACP supersedes the legacy ``modes`` field with ``config_options``, and
+        Zed renders one selector per entry. The mode selector is listed first
+        because the array order is the agent's stated display priority.
+        """
+        options: list[SessionConfigOptionSelect | SessionConfigOptionBoolean] = [
+            SessionConfigOptionSelect(
+                id=self._MODE_CONFIG_ID,
+                name="Mode",
+                description="Controls how the agent requests edit permission.",
+                category="mode",
+                type="select",
+                current_value=self._current_mode_id(state),
+                options=[
+                    SessionConfigSelectOption(
+                        value=mode_id, name=name, description=description
+                    )
+                    for mode_id, name, description in self._MODE_DEFINITIONS
+                ],
+            )
+        ]
+
         if model_state is None or not model_state.available_models:
-            return []
+            return options
         option_values = {
             model.model_id for model in model_state.available_models if model.model_id
         }
         if not model_state.current_model_id or model_state.current_model_id not in option_values:
-            return []
-        return [
+            return options
+        options.append(
             SessionConfigOptionSelect(
                 id="model",
                 name="Model",
@@ -1015,7 +1046,8 @@ class HermesACPAgent(acp.Agent):
                     for model in model_state.available_models
                 ],
             )
-        ]
+        )
+        return options
 
     @staticmethod
     def _resolve_model_selection(raw_model: str, current_provider: str) -> tuple[str, str]:
@@ -1644,7 +1676,7 @@ class HermesACPAgent(acp.Agent):
         model_state = self._build_model_state(state)
         return NewSessionResponse(
             session_id=state.session_id,
-            config_options=self._session_config_options(model_state),
+            config_options=self._session_config_options(model_state, state),
             models=model_state,
             modes=self._session_modes(state),
             field_meta=self._provenance_meta(
@@ -1694,7 +1726,7 @@ class HermesACPAgent(acp.Agent):
         self._schedule_usage_update(state)
         model_state = self._build_model_state(state)
         return LoadSessionResponse(
-            config_options=self._session_config_options(model_state),
+            config_options=self._session_config_options(model_state, state),
             models=model_state,
             modes=self._session_modes(state),
             field_meta=self._provenance_meta(
@@ -1732,7 +1764,7 @@ class HermesACPAgent(acp.Agent):
         self._schedule_usage_update(state)
         model_state = self._build_model_state(state)
         return ResumeSessionResponse(
-            config_options=self._session_config_options(model_state),
+            config_options=self._session_config_options(model_state, state),
             models=model_state,
             modes=self._session_modes(state),
             field_meta=self._provenance_meta(
@@ -1778,7 +1810,7 @@ class HermesACPAgent(acp.Agent):
         model_state = self._build_model_state(state) if state is not None else None
         return ForkSessionResponse(
             session_id=new_id,
-            config_options=self._session_config_options(model_state),
+            config_options=self._session_config_options(model_state, state),
             models=model_state,
             modes=self._session_modes(state) if state is not None else None,
         )
@@ -2680,7 +2712,16 @@ class HermesACPAgent(acp.Agent):
             state = self.session_manager.get_session(session_id) or state
             return SetSessionConfigOptionResponse(
                 config_options=self._session_config_options(
-                    self._build_model_state(state)
+                    self._build_model_state(state), state
+                )
+            )
+
+        if str(config_id) == self._MODE_CONFIG_ID:
+            await self.set_session_mode(str(value), session_id)
+            state = self.session_manager.get_session(session_id) or state
+            return SetSessionConfigOptionResponse(
+                config_options=self._session_config_options(
+                    self._build_model_state(state), state
                 )
             )
 
@@ -2697,6 +2738,6 @@ class HermesACPAgent(acp.Agent):
         logger.info("Session %s: config option %s updated", session_id, config_id)
         return SetSessionConfigOptionResponse(
             config_options=self._session_config_options(
-                self._build_model_state(state)
+                self._build_model_state(state), state
             )
         )

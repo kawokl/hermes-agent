@@ -59,11 +59,10 @@ def agent(mock_manager):
     return HermesACPAgent(session_manager=mock_manager)
 
 
-@pytest.mark.asyncio
-async def test_empty_model_inventory_does_not_advertise_empty_selector(agent):
+def test_empty_model_inventory_still_advertises_the_mode_selector(agent):
     model_state = SessionModelState(current_model_id="", available_models=[])
 
-    assert agent._session_config_options(model_state) == []
+    assert [option.id for option in agent._session_config_options(model_state)] == ["mode"]
 
 
 @pytest.mark.parametrize("current_model_id", ["", "openai-codex:not-listed"])
@@ -78,7 +77,23 @@ def test_model_selector_requires_current_value_in_options(agent, current_model_i
         ],
     )
 
-    assert agent._session_config_options(model_state) == []
+    # An unusable model selector is suppressed, but the mode selector remains.
+    assert [option.id for option in agent._session_config_options(model_state)] == ["mode"]
+
+
+def test_mode_config_option_matches_legacy_modes_field(agent):
+    """ACP requires `modes` and the `category="mode"` option to stay in sync."""
+    state = SimpleNamespace(mode="accept_edits", cwd="/tmp")
+
+    options = agent._session_config_options(None, state)
+    mode_option = next(option for option in options if option.id == "mode")
+    legacy = agent._session_modes(state)
+
+    assert mode_option.category == "mode"
+    assert mode_option.current_value == legacy.current_mode_id == "accept_edits"
+    assert [(o.value, o.name, o.description) for o in mode_option.options] == [
+        (m.id, m.name, m.description) for m in legacy.available_modes
+    ]
 
 
 @pytest.mark.asyncio
@@ -103,8 +118,9 @@ async def test_new_session_exposes_models_as_config_option_and_edit_approvals_as
         resp = await agent.new_session(cwd="/tmp")
 
     assert resp.config_options is not None
-    assert len(resp.config_options) == 1
-    model_option = resp.config_options[0]
+    # Mode is advertised first: config option order is the display priority.
+    assert [option.id for option in resp.config_options] == ["mode", "model"]
+    model_option = resp.config_options[1]
     assert isinstance(model_option, SessionConfigOptionSelect)
     assert model_option.id == "model"
     assert model_option.name == "Model"
@@ -145,7 +161,7 @@ async def test_edit_approval_config_returns_model_option_without_advertising_pol
     state = agent.session_manager.get_session(resp.session_id)
 
     assert isinstance(update, SetSessionConfigOptionResponse)
-    assert [option.id for option in update.config_options] == ["model"]
+    assert [option.id for option in update.config_options] == ["mode", "model"]
     assert getattr(state, "mode", None) == "accept_edits"
 
 
@@ -368,8 +384,8 @@ class TestSessionOps:
             )
 
         assert loaded.config_options is not None
-        assert [option.id for option in loaded.config_options] == ["model"]
-        assert loaded.config_options[0].current_value == (
+        assert [option.id for option in loaded.config_options] == ["mode", "model"]
+        assert loaded.config_options[1].current_value == (
             "openai-codex:gpt-5.6-sol"
         )
 
@@ -420,8 +436,8 @@ class TestSessionOps:
             )
 
         assert resumed.config_options is not None
-        assert [option.id for option in resumed.config_options] == ["model"]
-        assert resumed.config_options[0].current_value == (
+        assert [option.id for option in resumed.config_options] == ["mode", "model"]
+        assert resumed.config_options[1].current_value == (
             "openai-codex:gpt-5.6-sol"
         )
 
@@ -467,9 +483,8 @@ class TestListAndFork:
             )
 
         assert fork_resp.config_options is not None
-        assert len(fork_resp.config_options) == 1
-        assert fork_resp.config_options[0].id == "model"
-        assert fork_resp.config_options[0].current_value == (
+        assert [option.id for option in fork_resp.config_options] == ["mode", "model"]
+        assert fork_resp.config_options[1].current_value == (
             "openai-codex:gpt-5.6-sol"
         )
 
@@ -554,8 +569,38 @@ class TestSessionConfiguration:
             api_mode=None,
         )
         assert isinstance(update, SetSessionConfigOptionResponse)
-        assert len(update.config_options) == 1
-        assert update.config_options[0].current_value == "anthropic:claude-opus-5"
+        assert [option.id for option in update.config_options] == ["mode", "model"]
+        assert update.config_options[1].current_value == "anthropic:claude-opus-5"
+
+    @pytest.mark.asyncio
+    async def test_mode_config_option_switches_edit_approval_policy(self, agent):
+        """Selecting a mode in the client must change the session's policy."""
+        resp = await agent.new_session(cwd="/tmp")
+        state = agent.session_manager.get_session(resp.session_id)
+        assert agent._edit_approval_policy_for_state(state)[0] == "ask"
+
+        update = await agent.set_config_option(
+            "mode", resp.session_id, "accept_edits"
+        )
+        state = agent.session_manager.get_session(resp.session_id)
+
+        assert getattr(state, "mode", None) == "accept_edits"
+        assert agent._edit_approval_policy_for_state(state)[0] == "workspace_session"
+        mode_option = next(o for o in update.config_options if o.id == "mode")
+        assert mode_option.current_value == "accept_edits"
+        # The legacy field must report the same selection.
+        assert agent._session_modes(state).current_mode_id == "accept_edits"
+
+    @pytest.mark.asyncio
+    async def test_unknown_mode_config_value_falls_back_to_default(self, agent):
+        resp = await agent.new_session(cwd="/tmp")
+
+        update = await agent.set_config_option("mode", resp.session_id, "bogus")
+        state = agent.session_manager.get_session(resp.session_id)
+
+        assert getattr(state, "mode", None) == "default"
+        mode_option = next(o for o in update.config_options if o.id == "mode")
+        assert mode_option.current_value == "default"
 
     @pytest.mark.asyncio
     async def test_router_accepts_stable_session_config_methods(self, agent):
@@ -579,7 +624,8 @@ class TestSessionConfiguration:
 
         assert mode_result == {}
         assert [option["id"] for option in config_result["configOptions"]] == [
-            "model"
+            "mode",
+            "model",
         ]
 
 

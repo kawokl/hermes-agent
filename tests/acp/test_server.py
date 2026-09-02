@@ -66,6 +66,21 @@ async def test_empty_model_inventory_does_not_advertise_empty_selector(agent):
     assert agent._session_config_options(model_state) == []
 
 
+@pytest.mark.parametrize("current_model_id", ["", "openai-codex:not-listed"])
+def test_model_selector_requires_current_value_in_options(agent, current_model_id):
+    model_state = SessionModelState(
+        current_model_id=current_model_id,
+        available_models=[
+            ModelInfo(
+                model_id="anthropic:claude-opus-5",
+                name="Anthropic · claude-opus-5",
+            )
+        ],
+    )
+
+    assert agent._session_config_options(model_state) == []
+
+
 @pytest.mark.asyncio
 async def test_new_session_exposes_models_as_config_option_and_edit_approvals_as_modes(agent):
     model_state = SessionModelState(

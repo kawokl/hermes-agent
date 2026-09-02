@@ -986,6 +986,11 @@ class HermesACPAgent(acp.Agent):
         """Expose ACP models through the stable config-options model category."""
         if model_state is None or not model_state.available_models:
             return []
+        option_values = {
+            model.model_id for model in model_state.available_models if model.model_id
+        }
+        if not model_state.current_model_id or model_state.current_model_id not in option_values:
+            return []
         return [
             SessionConfigOptionSelect(
                 id="model",

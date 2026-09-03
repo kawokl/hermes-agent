@@ -151,6 +151,16 @@ class TestWslCwdTranslation:
 # ---------------------------------------------------------------------------
 
 
+def test_fork_session_preserves_mode(manager):
+    original = manager.create_session(cwd="/tmp/base")
+    original.mode = "plan"
+
+    forked = manager.fork_session(original.session_id, cwd="/tmp/fork")
+
+    assert forked is not None
+    assert forked.mode == "plan"
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +277,20 @@ class TestListAndCleanup:
 
 class TestPersistence:
     """Verify that sessions are persisted to SessionDB and can be restored."""
+
+
+    def test_mode_survives_process_restart(self, manager):
+        state = manager.create_session(cwd="/tmp/work")
+        state.mode = "dont_ask"
+        manager.save_session(state.session_id)
+
+        with manager._lock:
+            del manager._sessions[state.session_id]
+
+        restored = manager.get_session(state.session_id)
+
+        assert restored is not None
+        assert restored.mode == "dont_ask"
 
 
 

@@ -174,6 +174,7 @@ class SessionState:
     agent: Any  # AIAgent instance
     cwd: str = "."
     model: str = ""
+    mode: str = "default"
     history: List[Dict[str, Any]] = field(default_factory=list)
     cancel_event: Any = None  # threading.Event
     is_running: bool = False
@@ -270,6 +271,7 @@ class SessionManager:
             agent=agent,
             cwd=cwd,
             model=getattr(agent, "model", original.model) or original.model,
+            mode=original.mode,
             history=copy.deepcopy(original.history),
             cancel_event=threading.Event(),
         )
@@ -433,6 +435,8 @@ class SessionManager:
         # Ensure model is a plain string (not a MagicMock or other proxy).
         model_str = str(state.model) if state.model else None
         session_meta = {"cwd": state.cwd}
+        if isinstance(state.mode, str) and state.mode.strip():
+            session_meta["mode"] = state.mode.strip()
         provider = getattr(state.agent, "provider", None)
         base_url = getattr(state.agent, "base_url", None)
         api_mode = getattr(state.agent, "api_mode", None)
@@ -452,7 +456,7 @@ class SessionManager:
                     session_id=state.session_id,
                     source="acp",
                     model=model_str,
-                    model_config={"cwd": state.cwd},
+                    model_config=session_meta,
                 )
             else:
                 # Update model_config (contains cwd) if changed.
@@ -532,6 +536,7 @@ class SessionManager:
         requested_provider = row.get("billing_provider")
         restored_base_url = row.get("billing_base_url")
         restored_api_mode = None
+        restored_mode = "default"
         mc = row.get("model_config")
         if mc:
             try:
@@ -541,6 +546,8 @@ class SessionManager:
                     requested_provider = meta.get("provider") or requested_provider
                     restored_base_url = meta.get("base_url") or restored_base_url
                     restored_api_mode = meta.get("api_mode") or restored_api_mode
+                    if isinstance(meta.get("mode"), str) and meta["mode"].strip():
+                        restored_mode = meta["mode"].strip()
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -577,6 +584,7 @@ class SessionManager:
             agent=agent,
             cwd=cwd,
             model=model or getattr(agent, "model", "") or "",
+            mode=restored_mode,
             history=history,
             cancel_event=threading.Event(),
         )

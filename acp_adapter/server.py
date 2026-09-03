@@ -842,10 +842,15 @@ class HermesACPAgent(acp.Agent):
                     description = f"Provider: {provider_name}"
                     if is_current:
                         description += " • current"
+                    display_name = (
+                        rendered_model
+                        if normalize_provider(encoded_provider) == "openai-codex"
+                        else f"{provider_name} · {rendered_model}"
+                    )
                     available_models.append(
                         ModelInfo(
                             model_id=choice_id,
-                            name=f"{provider_name} · {rendered_model}",
+                            name=display_name,
                             description=description,
                         )
                     )
@@ -953,7 +958,9 @@ class HermesACPAgent(acp.Agent):
                     0,
                     ModelInfo(
                         model_id=current_model_id,
-                        name=f"{provider_name} · {model}",
+                        name=model
+                        if normalize_provider(normalized_provider) == "openai-codex"
+                        else f"{provider_name} · {model}",
                         description=f"Provider: {provider_name} • current",
                     ),
                 )

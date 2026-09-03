@@ -285,8 +285,8 @@ class TestSessionOps:
         ]
         assert [model.name for model in resp.models.available_models] == [
             "Anthropic · claude-sonnet-4-6",
-            "OpenAI Codex · gpt-5.4",
-            "OpenAI Codex · gpt-5.4-mini",
+            "gpt-5.4",
+            "gpt-5.4-mini",
         ]
         assert resp.models.available_models[1].description is not None
         assert "current" in resp.models.available_models[1].description

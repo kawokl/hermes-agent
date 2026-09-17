@@ -332,3 +332,31 @@ class TestTelegramApprovalCallback:
         assert runner.last_source.platform == Platform.TELEGRAM
         assert runner.last_source.user_id == "222"
 
+    @pytest.mark.asyncio
+    async def test_reminder_hook_failure_keeps_keyboard_for_retry(self):
+        adapter = _make_adapter()
+        adapter._is_callback_user_authorized = MagicMock(return_value=True)
+
+        query = AsyncMock()
+        query.data = "rr:opaque-token"
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.message.chat.type = "private"
+        query.message.message_id = 77
+        query.from_user = MagicMock()
+        query.from_user.id = 123
+        query.from_user.first_name = "Alice"
+
+        update = MagicMock()
+        update.callback_query = query
+
+        with patch(
+            "hermes_cli.lifecycle.invoke_hook",
+            side_effect=RuntimeError("temporary hook failure"),
+        ):
+            await adapter._handle_callback_query(update, MagicMock())
+
+        query.answer.assert_called_once_with(text="⏳ Wird verarbeitet…")
+        query.edit_message_reply_markup.assert_not_called()
+        query.edit_message_text.assert_not_called()
+

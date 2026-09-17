@@ -4360,6 +4360,7 @@ class TelegramAdapter(BasePlatformAdapter):
         for prefix, handler in (
             ("gt:", self._handle_gmail_triage_callback), ("ea:", self._handle_exec_approval_callback),
             ("sc:", self._handle_slash_confirm_callback), ("cl:", self._handle_clarify_callback),
+            (("rr:", "rt:"), self._handle_reminder_callback),
             ("update_prompt:", self._handle_update_prompt_callback)):
             if data.startswith(prefix):
                 await handler(query, data, cb)
@@ -4529,6 +4530,57 @@ class TelegramAdapter(BasePlatformAdapter):
             # Entry evicted / gateway restarted between ask and tap.
             await self._notify_clarify_expired(query, user_display)
             logger.warning("Telegram clarify button: resolve_gateway_clarify returned False (id=%s)", clarify_id)
+
+    async def _handle_reminder_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
+        """Route ``rr:``/``rt:`` reminder buttons through the plugin event hook."""
+        if not await self._callback_authorized(query, cb, "⛔ Kein Zugriff."):
+            return
+
+        # Answer Telegram immediately. Plugin hooks may touch the Vault and
+        # call the Bot API; waiting until afterwards can exceed Telegram's
+        # callback-query timeout even though the state write succeeded.
+        try:
+            await query.answer(text="⏳ Wird verarbeitet…")
+        except Exception as exc:
+            logger.debug("[%s] callback pre-answer failed: %s", self.name, exc)
+
+        try:
+            from hermes_cli.lifecycle import invoke_hook
+
+            results = invoke_hook(
+                "gateway_platform_event",
+                platform="telegram",
+                event_type="callback_query",
+                payload={
+                    "chat_id": str(cb["chat_id"] or ""),
+                    "message_id": str(getattr(query.message, "message_id", "") or ""),
+                    "thread_id": str(cb["thread_id"]) if cb["thread_id"] is not None else None,
+                    "data": data,
+                },
+            )
+            handled = next(
+                (result for result in results if isinstance(result, dict) and result.get("handled")),
+                None,
+            )
+        except Exception as exc:
+            logger.error("[%s] reminder callback hook failed: %s", self.name, exc, exc_info=True)
+            # Preserve the button on transient hook failures so the user can
+            # retry the same reminder action.
+            return
+
+        if not handled:
+            with contextlib.suppress(Exception):
+                await query.edit_message_reply_markup(reply_markup=None)
+            return
+
+        try:
+            replacement = handled.get("replacement_text")
+            if isinstance(replacement, str) and replacement:
+                await query.edit_message_text(text=replacement[:4096], reply_markup=None)
+            elif handled.get("remove_keyboard"):
+                await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as exc:
+            logger.warning("[%s] reminder callback message edit failed: %s", self.name, exc)
 
     async def _handle_update_prompt_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
         """``update_prompt:<y|n>`` — forward the answer to the update process."""

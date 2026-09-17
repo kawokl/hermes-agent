@@ -34,8 +34,10 @@ def _args(**overrides):
 
 @pytest.fixture
 def main_mod(monkeypatch):
+    import hermes_cli.config as config_mod
     import hermes_cli.main as mod
 
+    monkeypatch.setattr(config_mod, "_CLI_IN_DIR_OVERRIDE", None)
     monkeypatch.setattr(mod, "_has_any_provider_configured", lambda: True)
     monkeypatch.setattr(mod, "_sync_bundled_skills_for_startup", lambda: False)
     monkeypatch.setattr(mod, "_pin_kanban_board_env", lambda: None)
@@ -245,6 +247,7 @@ def test_in_dir_replaces_inherited_terminal_cwd(main_mod, monkeypatch, tmp_path)
     from pathlib import Path
 
     from agent.runtime_cwd import resolve_agent_cwd
+    from hermes_cli.config import get_cli_in_dir_override
 
     inherited = tmp_path / "inherited"
     target = tmp_path / "target"
@@ -258,8 +261,54 @@ def test_in_dir_replaces_inherited_terminal_cwd(main_mod, monkeypatch, tmp_path)
 
     assert Path.cwd().resolve() == target.resolve()
     assert Path(os.environ["TERMINAL_CWD"]).resolve() == target.resolve()
+    assert "HERMES_CLI_IN_DIR" not in os.environ
+    assert Path(get_cli_in_dir_override()).resolve() == target.resolve()
     assert resolve_agent_cwd().resolve() == target.resolve()
     assert args.no_restore_cwd is True
+
+
+def test_in_dir_survives_lazy_terminal_config_bridge(main_mod, monkeypatch, tmp_path):
+    """Late config bridging and a prewarmed shell must not undo ``--in``."""
+    import json
+    import os
+    from pathlib import Path
+
+    import hermes_cli.config as config_mod
+    import tools.terminal_tool as terminal_tool
+
+    configured = tmp_path / "configured"
+    target = tmp_path / "target"
+    configured.mkdir()
+    target.mkdir()
+    monkeypatch.chdir(configured)
+    monkeypatch.setenv("TERMINAL_CWD", str(configured))
+    monkeypatch.setattr(terminal_tool, "_terminal_config_bridge_attempted", False)
+    monkeypatch.setattr(
+        config_mod,
+        "read_raw_config",
+        lambda: {"terminal": {"cwd": str(configured)}},
+    )
+    monkeypatch.setattr(
+        config_mod,
+        "load_config_readonly",
+        lambda: {"terminal": {"cwd": str(configured)}},
+    )
+
+    terminal_tool.cleanup_all_environments()
+    try:
+        prewarmed = json.loads(terminal_tool.terminal_tool("pwd", timeout=10))
+        assert Path(prewarmed["output"]).resolve() == configured.resolve()
+
+        main_mod._apply_in_dir(_args(in_dir=str(target)))
+        terminal_tool._ensure_terminal_env_bridged()
+        after = json.loads(
+            terminal_tool.terminal_tool("pwd", timeout=10, task_id="fresh-cli-turn")
+        )
+
+        assert Path(os.environ["TERMINAL_CWD"]).resolve() == target.resolve()
+        assert Path(after["output"]).resolve() == target.resolve()
+    finally:
+        terminal_tool.cleanup_all_environments()
 
 
 def test_in_dir_leaves_unset_terminal_cwd_unset(main_mod, monkeypatch, tmp_path):

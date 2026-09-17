@@ -641,7 +641,7 @@ if sys.platform == "win32":
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
-from hermes_cli.config import get_hermes_home
+from hermes_cli.config import get_hermes_home, set_cli_in_dir_override
 from hermes_cli.env_loader import load_hermes_dotenv
 
 # ``update`` must not resolve external secret sources (Windows self-lock via cryptography, slow
@@ -1513,7 +1513,13 @@ def _apply_in_dir(args) -> None:
     # process cwd (local exports it at cli import, docker mounts it, ssh and
     # container backends keep their own remote/sandbox default).
     if os.environ.get("TERMINAL_CWD", "").strip():
+        # Config and dotenv bridges can run after argument handling. Carry the
+        # explicit local directory through those bridges in process-local state
+        # so child Hermes processes do not inherit it accidentally.
+        set_cli_in_dir_override(_target_dir)
         os.environ["TERMINAL_CWD"] = _target_dir
+    else:
+        set_cli_in_dir_override(None)
     args.no_restore_cwd = True
 
 

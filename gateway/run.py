@@ -1966,6 +1966,15 @@ def _bridge_terminal_config_to_env(_terminal_cfg: dict) -> None:
             continue
         _val = _terminal_cfg[_cfg_key]
         if _cfg_key == "cwd":
+            # A local CLI ``--in`` directory is more specific than the profile's
+            # default cwd. gateway.run can be imported lazily by relay/runtime
+            # helpers inside that CLI process, so its module-level bridge must
+            # not undo the explicit workspace selection.
+            from hermes_cli.config import get_cli_in_dir_override
+
+            _cli_in_dir = str(get_cli_in_dir_override() or "").strip()
+            if _cli_in_dir:
+                _val = _cli_in_dir
             # Placeholders (".", "auto", "cwd") resolve to Path.home() later; only explicit paths bridge.
             if str(_val) in {".", "auto", "cwd"}:
                 continue

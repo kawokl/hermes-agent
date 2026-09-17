@@ -16,7 +16,12 @@ from gateway.cwd_placeholder import CWD_PLACEHOLDERS, resolve_placeholder_termin
 from hermes_cli.config import _is_ssh_remote_tilde_cwd
 
 
-def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):
+def _simulate_config_bridge(
+    cfg: dict,
+    initial_env: dict | None = None,
+    *,
+    cli_in_dir_override: str | None = None,
+):
     """Simulate the gateway config bridge logic from gateway/run.py.
 
     Returns the resulting env dict (only TERMINAL_* and MESSAGING_CWD keys).
@@ -49,6 +54,8 @@ def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):
         for cfg_key, env_var in terminal_env_map.items():
             if cfg_key in terminal_cfg:
                 val = terminal_cfg[cfg_key]
+                if cfg_key == "cwd" and cli_in_dir_override:
+                    val = cli_in_dir_override
                 # Skip cwd placeholder values — don't overwrite already-resolved
                 # TERMINAL_CWD.  Mirrors the fix in gateway/run.py.
                 if cfg_key == "cwd" and str(val) in {".", "auto", "cwd"}:
@@ -169,6 +176,16 @@ class TestNestedTerminalCwdPlaceholderSkip:
         assert result["TERMINAL_ENV"] == "docker"
         assert result["TERMINAL_TIMEOUT"] == "300"
         assert result.get("TERMINAL_CWD") is None
+
+    def test_explicit_cli_in_dir_survives_gateway_bridge(self):
+        """A lazy gateway import must not undo the CLI's explicit workspace."""
+        cfg = {"terminal": {"cwd": "/configured/default", "backend": "local"}}
+        result = _simulate_config_bridge(
+            cfg,
+            cli_in_dir_override="/explicit/project",
+        )
+
+        assert result["TERMINAL_CWD"] == "/explicit/project"
 
 
     def test_docker_placeholder_mount_on_preserves_messaging_cwd(self):

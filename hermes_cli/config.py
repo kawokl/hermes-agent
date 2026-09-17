@@ -34,6 +34,23 @@ from utils import atomic_replace, atomic_yaml_write, fast_safe_load, file_signat
 
 logger = logging.getLogger(__name__)
 
+_CLI_IN_DIR_OVERRIDE: Optional[str] = None
+
+
+def set_cli_in_dir_override(path: Optional[str]) -> None:
+    """Set the process-local terminal cwd selected by the CLI ``--in`` flag.
+
+    This deliberately is not an environment variable: child processes that do
+    not receive their own ``--in`` argument must not inherit the override.
+    """
+    global _CLI_IN_DIR_OVERRIDE
+    _CLI_IN_DIR_OVERRIDE = path
+
+
+def get_cli_in_dir_override() -> Optional[str]:
+    """Return the process-local cwd selected by the CLI ``--in`` flag."""
+    return _CLI_IN_DIR_OVERRIDE
+
 # (config_path, mtime_ns, size) tuples already warned about, so concurrent CLI/gateway
 # loads of a broken config.yaml don't spam stderr. A changed file (new mtime) warns again.
 _CONFIG_PARSE_WARNED: set = set()
@@ -2141,6 +2158,7 @@ def apply_terminal_config_to_env(
     without importing ``cli.py``. Explicit keys in the user's raw ``terminal`` section override
     matching env values; merged defaults only backfill missing env vars."""
     target = os.environ if env is None else env
+    explicit_cli_cwd = str(get_cli_in_dir_override() or "").strip()
 
     raw_terminal_cfg = read_raw_config().get("terminal")
     file_has_terminal_config = isinstance(raw_terminal_cfg, dict)
@@ -2167,9 +2185,12 @@ def apply_terminal_config_to_env(
         if not _terminal_config_value_is_bridgeable(cfg_key, value):
             continue
         if cfg_key == "cwd":
-            raw_cwd = str(value or "").strip()
-            if isinstance(value, str) and not _is_ssh_remote_tilde_cwd(terminal_backend, raw_cwd):
-                value = os.path.expanduser(value)
+            if explicit_cli_cwd:
+                value = explicit_cli_cwd
+            else:
+                raw_cwd = str(value or "").strip()
+                if isinstance(value, str) and not _is_ssh_remote_tilde_cwd(terminal_backend, raw_cwd):
+                    value = os.path.expanduser(value)
         if (should_override and cfg_key in explicit_keys) or env_var not in target:
             target[env_var] = _terminal_env_value(value)
     return target

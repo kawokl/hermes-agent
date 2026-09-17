@@ -282,9 +282,14 @@ class TestSessionOps:
 
 
     @pytest.mark.asyncio
-    async def test_load_session_not_found_returns_none(self, agent):
-        resp = await agent.load_session(cwd="/tmp", session_id="bogus")
-        assert resp is None
+    async def test_load_session_not_found_returns_protocol_error(self, agent):
+        from acp.exceptions import RequestError
+
+        with pytest.raises(RequestError, match="Session not found") as caught:
+            await agent.load_session(cwd="/tmp", session_id="bogus")
+
+        assert caught.value.code == -32001
+        assert caught.value.data == {"sessionId": "bogus"}
 
 
 

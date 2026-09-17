@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Deque, Optional
 
 import acp
+from acp.exceptions import RequestError
 from acp.schema import (
     AgentCapabilities, AgentMessageChunk, AuthenticateResponse, ClientCapabilities, ForkSessionResponse,
     Implementation, InitializeResponse, ListSessionsResponse, LoadSessionResponse, McpServerHttp, McpServerSse,
@@ -596,7 +597,11 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         state = self.session_manager.update_cwd(session_id, cwd)
         if state is None:
             logger.warning("load_session: session %s not found", session_id)
-            return None
+            raise RequestError(
+                -32001,
+                "Session not found",
+                {"sessionId": session_id},
+            )
         await self._attach_session_mcp(state, mcp_servers, "Loaded session %s", session_id)
         return LoadSessionResponse(**await self._session_response_fields(state, "load"))
 

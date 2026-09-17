@@ -399,6 +399,21 @@ class SessionManager:
             "model": model or default_model,
             "cwd": cwd,
         }
+        # ACP editors can override reasoning per extension instance without
+        # rewriting config.yaml (which may be immutable on managed hosts).
+        # Otherwise inherit the profile's normal agent.reasoning_effort.
+        raw_agent_cfg = config.get("agent")
+        agent_cfg = raw_agent_cfg if isinstance(raw_agent_cfg, dict) else {}
+        reasoning_effort = os.environ.get("HERMES_ACP_REASONING_EFFORT")
+        if reasoning_effort is None:
+            reasoning_effort = agent_cfg.get("reasoning_effort")
+        if reasoning_effort is not None:
+            from hermes_constants import parse_reasoning_effort
+
+            reasoning_config = parse_reasoning_effort(reasoning_effort)
+            if reasoning_config is not None:
+                kwargs["reasoning_config"] = reasoning_config
+
         try:
             runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
             kwargs.update({

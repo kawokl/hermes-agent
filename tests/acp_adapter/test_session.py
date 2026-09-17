@@ -117,6 +117,46 @@ class TestCreateSession:
 
         assert observed["cwd"] == str(workspace)
 
+    @pytest.mark.parametrize(
+        ("environment_effort", "expected_effort"),
+        [(None, "high"), ("medium", "medium")],
+    )
+    def test_make_agent_applies_profile_or_editor_reasoning_effort(
+        self,
+        monkeypatch,
+        environment_effort,
+        expected_effort,
+    ):
+        class FakeAgent:
+            model = "gpt-5.6-sol"
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        config = {
+            "model": {"default": "gpt-5.6-sol", "provider": "openai-codex"},
+            "agent": {"reasoning_effort": "high"},
+            "mcp_servers": {},
+        }
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            lambda requested=None: {"provider": requested},
+        )
+        monkeypatch.setattr("acp_adapter.session._register_task_cwd", lambda task_id, cwd: None)
+        if environment_effort is None:
+            monkeypatch.delenv("HERMES_ACP_REASONING_EFFORT", raising=False)
+        else:
+            monkeypatch.setenv("HERMES_ACP_REASONING_EFFORT", environment_effort)
+
+        state = SessionManager(db=None).create_session(cwd="/tmp/project")
+
+        assert state.agent.kwargs["reasoning_config"] == {
+            "enabled": True,
+            "effort": expected_effort,
+        }
+
 
 
 
